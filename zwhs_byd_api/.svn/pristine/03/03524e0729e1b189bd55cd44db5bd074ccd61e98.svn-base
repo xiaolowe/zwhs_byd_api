@@ -1,0 +1,81 @@
+package cn.org.citycloud.zwhs.bean;
+
+
+public class ServiceStoreSearchBean {
+	
+	private Integer pageNo = 1;
+	
+	private Integer pageSize = 10;
+	
+	private String service_name;
+	
+	private Integer service_state;
+	
+	private Integer service_verify;
+	
+	private Integer service_type;
+	
+
+	public Integer getPageNo() {
+		return pageNo;
+	}
+
+
+	public void setPageNo(Integer pageNo) {
+		this.pageNo = pageNo;
+	}
+
+
+	public Integer getPageSize() {
+		return pageSize;
+	}
+
+
+	public void setPageSize(Integer pageSize) {
+		this.pageSize = pageSize;
+	}
+
+
+	public String getService_name() {
+		return service_name;
+	}
+
+
+	public void setService_name(String service_name) {
+		this.service_name = service_name;
+	}
+
+
+	public Integer getService_state() {
+		return service_state;
+	}
+
+
+	public void setService_state(Integer service_state) {
+		this.service_state = service_state;
+	}
+
+
+	public Integer getService_verify() {
+		return service_verify;
+	}
+
+
+	public void setService_verify(Integer service_verify) {
+		this.service_verify = service_verify;
+	}
+
+
+	public Integer getService_type() {
+		return service_type;
+	}
+
+
+	public void setService_type(Integer service_type) {
+		this.service_type = service_type;
+	}
+
+
+	
+
+}

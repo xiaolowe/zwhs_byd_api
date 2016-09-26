@@ -1,0 +1,463 @@
+package cn.org.citycloud.zwhs.controller;
+
+import io.github.elkan1788.mpsdk4j.api.WechatAPIImpl;
+import io.github.elkan1788.mpsdk4j.vo.api.Menu;
+
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import javax.persistence.criteria.CriteriaBuilder;
+import javax.persistence.criteria.CriteriaQuery;
+import javax.persistence.criteria.Path;
+import javax.persistence.criteria.Predicate;
+import javax.persistence.criteria.Root;
+import javax.servlet.http.HttpServletRequest;
+import javax.validation.Valid;
+
+import net.rubyeye.xmemcached.MemcachedClient;
+import net.sf.json.JSONArray;
+
+import org.apache.commons.lang3.RandomStringUtils;
+import org.nutz.json.Json;
+import org.nutz.json.JsonFormat;
+import org.nutz.lang.Lang;
+import org.nutz.log.Log;
+import org.nutz.log.Logs;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RestController;
+
+import cn.org.citycloud.zwhs.bean.MaterialId;
+import cn.org.citycloud.zwhs.bean.LcMenu;
+import cn.org.citycloud.zwhs.bean.Wechat;
+import cn.org.citycloud.zwhs.bean.WxKey;
+import cn.org.citycloud.zwhs.bean.WxSearchKey;
+import cn.org.citycloud.zwhs.bean.WxUpdateKey;
+import cn.org.citycloud.zwhs.bean.wx.Asset;
+import cn.org.citycloud.zwhs.bean.wx.WxMenu;
+import cn.org.citycloud.zwhs.constants.Constants;
+import cn.org.citycloud.zwhs.core.BaseController;
+import cn.org.citycloud.zwhs.entity.Store;
+import cn.org.citycloud.zwhs.entity.WechatKey;
+import cn.org.citycloud.zwhs.entity.WechatMenu;
+import cn.org.citycloud.zwhs.handler.MyWechatHandler;
+import cn.org.citycloud.zwhs.mpsdk4j.exception.WechatApiException;
+import cn.org.citycloud.zwhs.mpsdk4j.util.HttpTool;
+import cn.org.citycloud.zwhs.mpsdk4j.vo.ApiResult;
+import cn.org.citycloud.zwhs.mpsdk4j.vo.MPAccount;
+import cn.org.citycloud.zwhs.mpsdk4j.vo.api.AccessToken;
+import cn.org.citycloud.zwhs.repository.MaterialWarehouseDao;
+import cn.org.citycloud.zwhs.repository.StoreDao;
+import cn.org.citycloud.zwhs.repository.WechatKeyDao;
+import cn.org.citycloud.zwhs.repository.WechatMenuDao;
+
+@RestController
+@RequestMapping(value="/wx")
+public class WeChartController extends BaseController {
+	
+	@Autowired
+	private StoreDao storeDao;
+	@Autowired
+	private WechatKeyDao wechatKeyDao;
+	@Autowired
+	private MaterialWarehouseDao materialWarehouseDao;
+	@Autowired
+	private WechatMenuDao wechatMenuDao;
+	@Autowired
+	private MyWechatHandler myWechatHandler;
+	@Autowired
+	private MemcachedClient cacheClient;
+	
+	private static int RETRY_COUNT=3;
+	
+	private static String create_menu = "/menu/create?access_token=";
+	
+	 private static final Log log = Logs.get();
+	 
+	 private static final String wechatapi = "https://api.weixin.qq.com/cgi-bin";
+	 
+	 private static String get_at = "/token?grant_type=client_credential&appid=%s&secret=%s";
+	
+	/**
+	 * 设置门店的微信账号信息
+	 * @param request
+	 * @param storeId
+	 * @param wechat
+	 * @return
+	 */
+	@RequestMapping(value="/set",method=RequestMethod.PUT)
+	public Object set(HttpServletRequest request,@RequestBody @Valid Wechat wechat){
+		Map<String, Object> resultMap = new HashMap<String, Object>();
+		Store store = storeDao.findOne(getStoreId());
+		if(store==null){
+			resultMap.put("code", 2);
+	        resultMap.put("msg", "店铺不存在");
+	        return resultMap;
+		}
+		String token = RandomStringUtils.randomAlphanumeric(30);
+		String path = request.getContextPath();
+		String url=Constants.API_URL+path+"/"+"wx"+"/"+"core"+"/"+getStoreId();
+		wechat.setWechatToken(token);
+		wechat.setWechatUrl(url);
+		BeanUtils.copyProperties(wechat, store);
+		storeDao.save(store);
+		return wechat;
+	}
+	/**
+	 * 获取门店微信账号信息
+	 * @param storeId
+	 * @return
+	 */
+	@RequestMapping(value="/get",method=RequestMethod.GET)
+	public Object get(){
+		Store store = storeDao.findOne(getStoreId());
+		Wechat wechat = new Wechat();
+		BeanUtils.copyProperties(store, wechat);
+		return wechat;
+	}
+	
+	/**
+	 * 获取门店关键字列表
+	 * @param storeId
+	 * @return
+	 */
+	@RequestMapping(value="/key",method=RequestMethod.GET)
+	public Object getAllKey(@Valid WxSearchKey wsk){
+		int page = wsk.getPage();
+		int pageSize = wsk.getPageSize();
+		Sort sort = new Sort(Sort.Direction.DESC,"updDate");
+		Pageable pageable = new PageRequest(page-1, pageSize, sort);
+		Specification<WechatKey> spec = new Specification<WechatKey>() {
+
+			@Override
+			public Predicate toPredicate(Root<WechatKey> root,
+					CriteriaQuery<?> query, CriteriaBuilder cb) {
+				// TODO Auto-generated method stub
+				Predicate predicate = cb.conjunction();
+				Path<Integer> storeId = root.get("storeId");
+				Path<Integer> replyType = root.get("replyType");
+				predicate = cb.and(predicate,cb.equal(storeId,getStoreId()),cb.equal(replyType, 2));
+				String searchValue = wsk.getSearchValue();
+				if(searchValue.length()>0){
+					Path<String> replyKeyword = root.get("replyKeyword");
+					predicate = cb.and(predicate,cb.like(replyKeyword, "%"+searchValue+"%"));
+				}
+				return query.where(predicate).getRestriction();
+			}
+			
+		};
+		return wechatKeyDao.findAll(spec, pageable);
+	}
+	/**
+	 * 获取某个关键字信息
+	 * @param keyId
+	 * @return
+	 */
+	@RequestMapping(value="/get/{keyId}",method=RequestMethod.GET)
+	public Object getKey(@PathVariable int keyId){
+		return wechatKeyDao.findOne(keyId);
+	}
+	
+	/**
+	 * 获取门店关注时和答不上来关键字
+	 * @param storeId
+	 * @param replyType
+	 * @return
+	 */
+	@RequestMapping(value="/key/{replyType}",method=RequestMethod.GET)
+	public Object getEventKey(@PathVariable int replyType){
+		List<WechatKey> wechatKey =  wechatKeyDao.findByStoreIdAndReplyType(getStoreId(), replyType);
+		if(wechatKey==null||wechatKey.size()<=0){
+			return "{}";
+		}
+		return wechatKey.get(0);
+	}
+	
+	/**
+	 * 获取关键字的图文列表
+	 * @param keyId
+	 * @return
+	 */
+	@RequestMapping(value="/key/material/{keyId}",method=RequestMethod.GET)
+	public Object getAllMaterial(@PathVariable int keyId){
+		return wechatKeyDao.findOne(keyId).getMaterialWarehouses();
+	}
+	
+	/**
+	 * 添加关键字
+	 * @param wxKey
+	 * @return
+	 */
+	@RequestMapping(value="/key",method=RequestMethod.POST)
+	public Object addKey(@RequestBody @Valid WxKey wxKey){
+		Map<String, Object> resultMap = new HashMap<String, Object>();
+		WechatKey wechatKey = wechatKeyDao.findByStoreIdAndReplyKeyword(wxKey.getStoreId(), wxKey.getReplyKeyword());
+		if(wechatKey!=null){
+			resultMap.put("code", 2);
+	        resultMap.put("msg", "关键字已存在");
+	        return resultMap;
+		}
+		wechatKey=new WechatKey();
+		BeanUtils.copyProperties(wxKey, wechatKey, "mids");
+		List<Integer> ids = new ArrayList<Integer>();
+		for(MaterialId id:wxKey.getMids()){
+			ids.add(id.getMid());
+		}
+		wechatKey.setMaterialWarehouses( materialWarehouseDao.findByIdIn(ids));
+		Date now = new Date();
+		wechatKey.setInsDate(now);
+		wechatKey.setUpdDate(now);
+		return wechatKeyDao.save(wechatKey);
+	}
+	/**
+	 * 更新关键字回复信息
+	 * @param wxUpdateKey
+	 * @return
+	 */
+	@RequestMapping(value="/key",method=RequestMethod.PUT)
+	public Object updateKey(@RequestBody @Valid WxUpdateKey wxUpdateKey){
+		Map<String, Object> resultMap = new HashMap<String, Object>();
+		WechatKey wechatKey = wechatKeyDao.findOne(wxUpdateKey.getKeyId());
+		if(wechatKey==null){
+			resultMap.put("code", 2);
+	        resultMap.put("msg", "关键字不存在");
+	        return resultMap;
+		}
+		wechatKey.setReplyConType(wxUpdateKey.getReplyConType());
+		if(wxUpdateKey.getReplyConType()==1){
+			wechatKey.setReplyText(wxUpdateKey.getReplyText());
+		}
+		if(wxUpdateKey.getReplyConType()==2){
+			List<Integer> ids = new ArrayList<Integer>();
+			for(MaterialId id:wxUpdateKey.getMids()){
+				ids.add(id.getMid());
+			}
+			wechatKey.setMaterialWarehouses( materialWarehouseDao.findByIdIn(ids));
+		}
+		Date now = new Date();
+		wechatKey.setUpdDate(now);
+		return wechatKeyDao.save(wechatKey);
+	}
+	/**
+	 * 删除关键字
+	 * @return
+	 */
+	@RequestMapping(value="/key/{keyId}",method=RequestMethod.DELETE)
+	public Object delKey(@PathVariable int keyId){
+		Map<String, Object> resultMap = new HashMap<String, Object>();
+		wechatKeyDao.delete(keyId);
+		resultMap.put("code", 1);
+        resultMap.put("msg", "成功");
+		return resultMap;
+	}
+	
+	/**
+	 * 添加门店微信菜单
+	 * @param menu
+	 * @return
+	 */
+	@RequestMapping(value="/menu",method=RequestMethod.POST)
+	public Object addMenu(@RequestBody @Valid LcMenu menu){
+		WechatMenu wechatMenu = new WechatMenu();
+		BeanUtils.copyProperties(menu, wechatMenu);
+		wechatMenu.setStoreId(getStoreId());
+		Date now = new Date();
+		wechatMenu.setInsDate(now);
+		wechatMenu.setUpdDate(now);
+		return wechatMenuDao.save(wechatMenu);
+	}
+	
+	/**
+	 * 更新门店微信菜单
+	 * @param menu
+	 * @return
+	 */
+	@RequestMapping(value="/menu",method=RequestMethod.PUT)
+	public Object updateMenu(@RequestBody @Valid LcMenu menu){
+		WechatMenu wechatMenu = wechatMenuDao.findByStoreId(getStoreId());
+		Date now = new Date();
+		if(wechatMenu==null){
+			wechatMenu = new WechatMenu();
+			wechatMenu.setStoreId(getStoreId());	
+			wechatMenu.setInsDate(now);
+		}
+		wechatMenu.setContent(menu.getContent());
+		wechatMenu.setUpdDate(now);
+		boolean flag=setWechatMenu(menu.getContent());
+		System.out.println("wxmenu set result:"+flag);
+		return wechatMenuDao.save(wechatMenu);
+	}
+	
+	/**
+	 * 查询门店微信菜单
+	 * @param storeId
+	 * @return
+	 */
+	@RequestMapping(value="/menu",method=RequestMethod.GET)
+	public Object updateMenu(){
+		WechatMenu wechatMenu = wechatMenuDao.findByStoreId(getStoreId());
+		return wechatMenu;
+	}
+	
+	/**
+	 * 设置微信菜单
+	 */
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	public boolean setWechatMenu(String content){
+		Store store  = storeDao.findByStoreId(getStoreId());
+		MPAccount mpAccount = new MPAccount();
+		mpAccount.setAppId(store.getAppId());
+		mpAccount.setAppSecret(store.getAppSecret());
+		mpAccount.setMpId(store.getWecharEntId());
+//		WechatAPIImpl wechatAPIImpl = new WechatAPIImpl(mpAccount);	
+		JSONArray jsonArray = JSONArray.fromObject(content);
+		Map<String, Class> classMap = new HashMap<String, Class>();
+		classMap.put("assets", Asset.class);
+		classMap.put("submenu", WxMenu.class);
+		List<WxMenu> wxMenus = JSONArray.toList(jsonArray, WxMenu.class, classMap);
+		List<Menu> menus = new ArrayList<Menu>();
+		for(WxMenu wxMenu:wxMenus){
+			Menu menu = setMenu(wxMenu);
+			if(menu!=null) menus.add(menu);
+		}
+		Map<String, Object> body = new HashMap<String, Object>();
+	    body.put("button", menus);
+	    String data = Json.toJson(body, JsonFormat.compact());
+	    System.out.println("data:"+data);
+	    return createMenu(mpAccount,(Menu[])menus.toArray(new Menu[menus.size()]));
+	}
+	
+	
+	/**
+	 * 转换自定义菜单到微信菜单
+	 * @param wxMenu
+	 * @return
+	 */
+	private Menu setMenu(WxMenu wxMenu){
+		Menu menu = new Menu();
+		if(wxMenu.getType().trim().equalsIgnoreCase("link")){
+			
+			menu.setType("view");
+			menu.setName(wxMenu.getTitle());
+			menu.setUrl(wxMenu.getLink().getUrl());
+			
+		}else if(wxMenu.getType().trim().equalsIgnoreCase("image")){
+			menu.setType("click");
+			menu.setName(wxMenu.getTitle());
+			String key="";
+			if(wxMenu.getAssets().size()>0){
+				for(Asset asset:wxMenu.getAssets()){
+					key+=asset.getId()+"_";
+					
+				}
+			}
+			
+			if(key.length()>0) menu.setKey(key);
+			
+		}else if(wxMenu.getType().trim().equalsIgnoreCase("text")){
+			menu.setName(wxMenu.getTitle());
+			List<Menu> menus = new ArrayList<Menu>();
+			if(wxMenu.getSubmenu().size()>0){
+				for(WxMenu wm:wxMenu.getSubmenu()){
+					Menu mu = setMenu(wm);
+					if(mu!=null) menus.add(mu);
+				}
+			}
+			
+			menu.setSubButtons(menus);
+		}else {
+			menu = null;
+		}
+		return menu;
+	}
+	
+	
+	 private boolean createMenu(MPAccount mpAccount,Menu... menu) {
+	        String url = mergeUrl(create_menu + getAccessToken(mpAccount));
+	        Map<String, Object> body = new HashMap<String, Object>();
+	        body.put("button", menu);
+	        String data = Json.toJson(body, JsonFormat.compact());
+	        ApiResult ar = null;
+	        for (int i = 0; i < RETRY_COUNT; i++) {
+	            ar = ApiResult.create(HttpTool.post(url, data));
+	            if (ar.isSuccess()) {
+	                return true;
+	            }
+
+	            log.errorf("Create mp[%s] custom menu failed. There try %d items.",
+	            		mpAccount.getAppId(),
+	                       i + 1);
+
+
+	        }
+
+	        throw Lang.wrapThrow(new WechatApiException(ar.getJson()));
+	    }
+	 
+	 private String getAccessToken(MPAccount mpAccount) {
+	    	AccessToken at = null;
+	    	try {
+	    		
+	    		at = cacheClient.get(mpAccount.getMpId());
+	            if (at == null) {
+	                refreshAccessToken(mpAccount);
+	                at = cacheClient.get(mpAccount.getMpId());
+	            }
+			} catch (Exception e) {
+				// TODO: handle exception
+				throw Lang.wrapThrow(e);
+			}
+	   
+	        return at.getAccessToken();
+	    }
+	
+	 private synchronized void refreshAccessToken(MPAccount mpAccount) {
+	        String url = mergeUrl(get_at, mpAccount.getAppId(), mpAccount.getAppSecret());
+	        AccessToken at = null;
+	        ApiResult ar = null;
+	        for (int i = 0; i < RETRY_COUNT; i++) {
+	            ar = ApiResult.create(HttpTool.get(url));
+	            if (ar.isSuccess()) {
+	                at = Json.fromJson(AccessToken.class, ar.getJson());
+	                try {
+						cacheClient.set(mpAccount.getMpId(), 7150,at);
+						
+					} catch(Exception e){
+						throw Lang.wrapThrow(e);
+					}
+	            }
+
+	            if (at != null && at.isAvailable()) {
+	                return;
+	            }
+
+	            log.errorf("Get mp[%s]access_token failed. There try %d items.", mpAccount.getMpId(), i + 1);
+
+	        }
+
+	        throw Lang.wrapThrow(new WechatApiException(ar.getJson()));
+	    }
+	 
+	 private String mergeUrl(String url, Object... values) {
+	        if (!Lang.isEmpty(values)) {
+	            return wechatapi + String.format(url, values);
+	        }
+	        return wechatapi + url;
+	    }
+	
+//----------------------------------------------------------------------------
+	
+	
+	
+}

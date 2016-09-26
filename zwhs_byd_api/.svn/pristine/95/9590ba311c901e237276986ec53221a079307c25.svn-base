@@ -1,0 +1,152 @@
+package cn.org.citycloud.zwhs.service;
+import java.util.Date;
+
+import javax.persistence.criteria.CriteriaBuilder;
+import javax.persistence.criteria.CriteriaQuery;
+import javax.persistence.criteria.Path;
+import javax.persistence.criteria.Predicate;
+import javax.persistence.criteria.Root;
+
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
+
+import cn.org.citycloud.zwhs.entity.ServiceStore;
+import cn.org.citycloud.zwhs.repository.ServiceStoreDao;
+
+
+
+//Spring Bean的标识.
+@Component
+// 类中所有public函数都纳入事务管理的标识.
+@Transactional
+public class ServiceStoreService {
+	@Autowired
+	private ServiceStoreDao serviceStoreDao;
+	
+	
+	/**
+	 * 动态查询门店服务列表
+	 * @param pageable
+	 * @param serviceStore
+	 * @return
+	 */
+	public Page<ServiceStore> getServiceStoreList(Pageable pageable, ServiceStore serviceStore){
+		
+		Page<ServiceStore> page = serviceStoreDao.findAll(new Specification<ServiceStore>() {
+			@Override
+			public Predicate toPredicate(Root<ServiceStore> root, CriteriaQuery<?> query, CriteriaBuilder cb) {
+				
+				Predicate where = cb.conjunction();  
+		        
+				if(serviceStore != null && serviceStore.getServiceInfo() != null && 
+						StringUtils.isNotBlank(serviceStore.getServiceInfo().getServiceName())){
+					Path<String> serviceName = root.get("serviceInfo").get("serviceName");  
+					where = cb.and(where, cb.like(serviceName, "%"+serviceStore.getServiceInfo().getServiceName()+"%"));
+				}
+				if(serviceStore != null && serviceStore.getServiceInfo() != null && 
+						serviceStore.getServiceInfo().getType() != null){
+					Path<String> serviceType = root.get("serviceInfo").get("type");  
+					where = cb.and(where, cb.equal(serviceType, serviceStore.getServiceInfo().getType()));
+				}
+				if(serviceStore != null && serviceStore.getStoreId() != null){
+					Path<Integer> storeId = root.get("storeId");  
+					where = cb.and(where, cb.equal(storeId, serviceStore.getStoreId()));  
+				}
+				if(serviceStore != null && serviceStore.getServiceState() != null){
+					Path<Integer> serviceState = root.get("serviceState");  
+					where = cb.and(where, cb.equal(serviceState, serviceStore.getServiceState()));  
+				}
+				if(serviceStore != null && serviceStore.getServiceVerify() != null){
+					Path<Integer> serviceVerify = root.get("serviceVerify");  
+					where = cb.and(where, cb.equal(serviceVerify, serviceStore.getServiceVerify()));  
+				}
+				query.where(where);
+				  
+			    return null;  
+			}
+		}, pageable);
+		
+	    return page;
+	}
+
+	/**
+	 * 查找母婴店服务信息
+	 * @param serviceStoreId
+	 * @return
+	 */
+	public ServiceStore getServiceStoreById(Integer id){
+		
+		return serviceStoreDao.findOne(id);
+		
+	}
+	
+	/**
+	 * 审核、驳回、冻结服务商信息
+	 * @return
+	 */
+	public ServiceStore checkServiceStoreById(Integer serviceStoreId, Integer serviceVerify){
+		
+		ServiceStore serviceStore = serviceStoreDao.findOne(serviceStoreId);
+		serviceStore.setServiceVerify(serviceVerify);  // 服务审核 1 审核通过，0未通过，2 驳回  3 冻结  4已申请但未审核
+		Date now = new Date();
+		serviceStore.setUpdDate(now);
+
+		return serviceStoreDao.save(serviceStore);
+		
+	}
+	
+	
+	/**
+	 * 添加店铺服务信息
+	 * @param serviceStore
+	 * @return
+	 */
+	public ServiceStore addServiceStoreById(ServiceStore serviceStore){
+		
+		ServiceStore sadd = new ServiceStore();
+		
+		if(serviceStore != null && StringUtils.isNoneEmpty(serviceStore.getCompanyName())){
+			sadd.setCompanyName(serviceStore.getCompanyName());
+		}
+		if(serviceStore != null && StringUtils.isNoneEmpty(serviceStore.getContactsName())){
+			sadd.setContactsName(serviceStore.getContactsName());
+		}
+		if(serviceStore != null && StringUtils.isNoneEmpty(serviceStore.getContactsPhone())){
+			sadd.setContactsPhone(serviceStore.getContactsPhone());
+		}
+		if(serviceStore != null && serviceStore.getServiceAddtime() != null){
+			sadd.setServiceAddtime(serviceStore.getServiceAddtime());
+		}
+		if(serviceStore != null && serviceStore.getServiceId() != null){
+			sadd.setServiceId(serviceStore.getServiceId());
+		}
+		if(serviceStore != null && serviceStore.getStoreId() != null){
+			sadd.setStoreId(serviceStore.getStoreId());
+		}
+//		if(serviceInfo != null && serviceInfo.getCommisRates() != null){
+//			siupdate.setCommisRates(serviceInfo.getCommisRates());
+//		}
+		Date now = new Date();
+		sadd.setConfirmTime(now);
+		sadd.setInsDate(now);
+		sadd.setUpdDate(now);
+		sadd.setServiceState(0);
+		sadd.setServiceVerify(0);
+		return serviceStoreDao.save(sadd);
+		
+	}
+	/**
+	 * 母婴店对应的服务唯一
+	 * @param serviceId
+	 * @return
+	 */
+	public ServiceStore getByStoreIdAndServiceId(Integer storeId, Integer serviceId){
+		
+		return serviceStoreDao.findByStoreIdAndServiceId(storeId, serviceId);
+	}
+}

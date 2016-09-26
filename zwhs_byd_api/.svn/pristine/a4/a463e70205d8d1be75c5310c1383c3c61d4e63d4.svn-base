@@ -1,0 +1,447 @@
+package cn.org.citycloud.zwhs.controller;
+import java.math.BigDecimal;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.validation.Valid;
+import net.rubyeye.xmemcached.MemcachedClient;
+import org.json.JSONObject;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseBody;
+import com.auth0.jwt.JWTSigner;
+import cn.org.citycloud.zwhs.bean.Identify;
+import cn.org.citycloud.zwhs.bean.Login;
+import cn.org.citycloud.zwhs.bean.Register;
+import cn.org.citycloud.zwhs.bean.UserToken;
+import cn.org.citycloud.zwhs.constants.Constants;
+import cn.org.citycloud.zwhs.constants.ErrorCodes;
+import cn.org.citycloud.zwhs.constants.SysCodes;
+import cn.org.citycloud.zwhs.core.BaseController;
+import cn.org.citycloud.zwhs.entity.FinAcc;
+import cn.org.citycloud.zwhs.entity.RegionInfo;
+import cn.org.citycloud.zwhs.entity.Store;
+import cn.org.citycloud.zwhs.entity.StoreUser;
+import cn.org.citycloud.zwhs.entity.WechatKey;
+import cn.org.citycloud.zwhs.exception.BusinessErrorException;
+import cn.org.citycloud.zwhs.repository.FinAccDao;
+import cn.org.citycloud.zwhs.repository.RegionInfoDao;
+import cn.org.citycloud.zwhs.repository.ServiceStoreDao;
+import cn.org.citycloud.zwhs.repository.StoreDao;
+import cn.org.citycloud.zwhs.repository.StoreSgDao;
+import cn.org.citycloud.zwhs.repository.StoreUserDao;
+import cn.org.citycloud.zwhs.repository.WechatKeyDao;
+import cn.org.citycloud.zwhs.utils.Sms;;
+
+@Controller
+@ResponseBody
+public class UserController extends BaseController {
+	
+	@Autowired
+	private StoreUserDao storeUserDao;
+	
+	@Autowired
+	private StoreDao storeDao;
+	
+	@Autowired
+	private RegionInfoDao regionInfoDao;
+	
+	@Autowired
+	private MemcachedClient cacheClient;
+	@Autowired
+	private ServiceStoreDao serviceStoreDao;
+	@Autowired
+	private FinAccDao finAccDao;
+	@Autowired
+	private WechatKeyDao wechatKeyDao;
+	@Autowired
+	private StoreSgDao storeSgDao;
+	
+	private static String smsInfo="888888";
+	/**
+	 * 母婴店登录
+	 * @param login
+	 * @return
+	 */
+	@RequestMapping(value="/user/tk/login",method=RequestMethod.POST)
+	public Object login(@RequestBody @Valid Login login,
+			HttpServletRequest request,HttpServletResponse response)throws Exception{
+		Map<String, Object> resultMap = new HashMap<String, Object>();
+		StoreUser user = storeUserDao.findByUserPhoneAndUserPwd(login.getPhone(), login.getPassword());
+		if(user!=null){
+			String token = generateToken(user, Constants.TOKEN_SECRET);
+			UserToken userToken = new UserToken();
+			userToken.setToken(token);
+			userToken.setCreateTs(System.currentTimeMillis());
+			userToken.setExpiresIn(Constants.TOKEN_EXPIRES_IN);
+			userToken.setStoreId(user.getStoreId());
+			userToken.setUserId(user.getUserId());
+			userToken.setUserName(user.getUserTruename());
+			
+//			ServiceStore serviceStore = serviceStoreDao.findByStoreId(user.getStoreId());
+//			int srvFlag = 0;
+//			if(serviceStore!=null){
+//				srvFlag=1;
+//			}
+			String companyName="";
+			int storeState = -1;
+			String storeLogo="";
+			Store store = storeDao.findByStoreId(user.getStoreId());
+			if(store!=null){
+				companyName = store.getCompanyName();
+				storeState = store.getStoreState();
+				storeLogo = store.getCompanyFax();
+			}
+			resultMap.put("code", "1");
+			resultMap.put("msg", "登录成功");
+			resultMap.put("userId", user.getUserId());
+			resultMap.put("storeId", user.getStoreId());
+			resultMap.put("token", token);
+//			resultMap.put("srvflay", srvFlag);
+			resultMap.put("companyName", companyName);
+			resultMap.put("storeState", storeState);
+ 			resultMap.put("storeLogo", storeLogo);
+ 			
+			userToken.setCompanyName(companyName);
+			
+ 			cacheClient.add(token, (int)Constants.TOKEN_EXPIRES_IN, userToken);
+			
+		}else{
+			throw new BusinessErrorException("2", "用户名密码不正确");
+		}
+		return resultMap;
+	}
+	/**
+	 * 母婴店注册
+	 * @param register
+	 * @return
+	 */
+	@RequestMapping(value="/user/tk/register",method=RequestMethod.POST)
+	public Object register(@RequestBody @Valid Register register){
+		Map<String, Object> resultMap = new HashMap<String, Object>();
+		try {
+			StoreUser storeUser = storeUserDao.findByUserPhone(register.getUserPhone());
+			if(storeUser!=null){
+				resultMap.put("code", SysCodes.FAIL);
+				resultMap.put("msg", "该手机号已存在");
+				return resultMap;
+			}
+			
+			String smsMsg = cacheClient.get(register.getUserPhone());
+			if(!smsInfo.equalsIgnoreCase(register.getSmsinfo())){
+				if(smsMsg==null||!smsMsg.equalsIgnoreCase(register.getSmsinfo())){
+					resultMap.put("code", SysCodes.FAIL);
+					resultMap.put("msg", "验证码错误");
+					return resultMap;
+				}
+			}
+			
+			storeUser = new StoreUser(); 
+			BeanUtils.copyProperties(register, storeUser);
+			Date now = new Date();
+			storeUser.setInsDate(now);
+			storeUser.setUpdDate(now);
+			storeUser = storeUserDao.save(storeUser);
+			resultMap.put("code", SysCodes.SUCCESS);
+			resultMap.put("msg", SysCodes.MSG_SUCCESS);
+			resultMap.put("content", storeUser);
+		} catch (Exception e) {
+			// TODO: handle exception
+			e.printStackTrace();
+			resultMap.put("code", SysCodes.FAIL);
+			resultMap.put("msg", SysCodes.MSG_FAIL);
+		}
+		
+		return resultMap;
+	}
+	
+	/**
+	 * 发送短信验证码
+	 * @param paramMap
+	 * @return
+	 */
+	@RequestMapping(value="/user/tk/sms",method=RequestMethod.POST)
+	public Object sendSms(@RequestBody Map<String, String> paramMap){
+		Map<String, Object> resultMap = new HashMap<String, Object>();
+		Sms sms = new Sms();
+		String code=sms.createRandom(true, 6);
+		
+        try {
+        	String httpResponse = sms.sendSms(paramMap.get("phone"), code);
+        	cacheClient.set(paramMap.get("phone"), 180, code);
+        	JSONObject jsonObj = new JSONObject( httpResponse );
+        	int error_code = jsonObj.getInt("error");
+        	String error_msg = jsonObj.getString("msg");
+        	resultMap.put("code", error_code);
+        	resultMap.put("msg", error_msg);
+       } catch (Exception ex) {
+           	ex.printStackTrace();
+           	resultMap.put("code", SysCodes.FAIL);
+           	resultMap.put("msg", SysCodes.MSG_FAIL);
+       }
+       return resultMap;
+	}
+	
+	/**
+	 * 修改密码
+	 * 验证该手机是否存在
+	 * 发送短信验证码
+	 * @param paramMap
+	 * @throws BusinessErrorException 
+	 */
+	@RequestMapping(value="/user/tk/smsphone",method=RequestMethod.POST)
+	public Object sendSmsByPhone(@RequestBody Map<String, String> paramMap) throws BusinessErrorException{
+		
+		StoreUser storeUser = storeUserDao.findByUserPhone(paramMap.get("phone"));
+		if(storeUser == null){
+			throw new BusinessErrorException(ErrorCodes.PARAM_ERROR, "该用户不存在！");
+		}
+		Map<String, Object> resultMap = new HashMap<String, Object>();
+		Sms sms = new Sms();
+		String code=sms.createRandom(true, 6);
+		
+        try {
+        	String httpResponse = sms.sendSms(paramMap.get("phone"), code);
+        	cacheClient.set(paramMap.get("phone"), 180, code);
+        	JSONObject jsonObj = new JSONObject( httpResponse );
+        	int error_code = jsonObj.getInt("error");
+        	String error_msg = jsonObj.getString("msg");
+        	resultMap.put("code", error_code);
+        	resultMap.put("msg", error_msg);
+       } catch (Exception ex) {
+           	ex.printStackTrace();
+           	resultMap.put("code", SysCodes.FAIL);
+           	resultMap.put("msg", SysCodes.MSG_FAIL);
+       }
+       return resultMap;
+	}
+	
+	/**
+	 * 修改密码
+	 * @param paramMap
+	 * @return
+	 * @throws BusinessErrorException 
+	 */
+	@RequestMapping(value="/user/tk/modifypwd",method=RequestMethod.POST)
+	public Object modifyPwd(@RequestBody Map<String, String> paramMap) throws BusinessErrorException{
+		
+		StoreUser storeUser = storeUserDao.findByUserPhone(paramMap.get("phone"));
+		if(storeUser == null){
+			throw new BusinessErrorException(ErrorCodes.PARAM_ERROR, "该用户不存在！");
+		}
+		storeUser.setUserPwd(paramMap.get("userPwd"));
+		
+		return storeUserDao.save(storeUser);	
+		
+	}
+	
+	/**
+	 * 母婴店信息认证
+	 * @param identify
+	 * @return
+	 */
+	@RequestMapping(value="/user/identify",method=RequestMethod.POST)
+	public Object authentication(@RequestBody @Valid Identify identify){
+		Map<String, Object> resultMap = new HashMap<String, Object>();
+		try {
+			StoreUser storeUser = storeUserDao.findOne(identify.getStoreUserId());
+			if(storeUser.getStoreId()==0){
+				Store store  = new Store();
+				//bean copy
+				BeanUtils.copyProperties(identify, store);
+				Date date = new Date();
+				store.setCreateTime(date);
+				store.setInsDate(date);
+				store.setUpdDate(date);
+				store.setUserPhone(storeUser.getUserPhone());
+				//设置省区县
+				RegionInfo regionInfo = regionInfoDao.findByRegionCode(identify.getRegionProv());
+				if(regionInfo==null){
+					resultMap.put("code", SysCodes.FAIL);
+			        resultMap.put("msg", "所在省填写有误");
+			        return resultMap;
+				}
+				store.setRegionProvName(regionInfo.getRegionName());
+				regionInfo = regionInfoDao.findByRegionCode(identify.getRegionCity());
+				if(regionInfo==null){
+					resultMap.put("code", SysCodes.FAIL);
+			        resultMap.put("msg", "所在市填写有误");
+			        return resultMap;
+				}
+				store.setRegionCityName(regionInfo.getRegionName());
+				regionInfo= regionInfoDao.findByRegionCode(identify.getCompanyRegion());
+				if(regionInfo==null){
+					resultMap.put("code", SysCodes.FAIL);
+			        resultMap.put("msg", "所在区县填写有误");
+			        return resultMap;
+				}
+				store.setRegionAreaName(regionInfo.getRegionName());
+				//end
+				store=storeDao.save(store);		
+				storeUser.setStoreId(store.getStoreId());
+				storeUserDao.save(storeUser);
+				//修改token,带上storeId
+				UserToken userToken = getUserToken();
+				userToken.setStoreId(store.getStoreId());
+				cacheClient.set(getToken(), (int)Constants.TOKEN_EXPIRES_IN,userToken);			
+				//设置账号信息
+				setFinAcc(store);
+				//设置微信关注时和答不上来回复
+				setWxKey(store);
+				//end
+				resultMap.put("code", SysCodes.SUCCESS);
+				resultMap.put("msg", SysCodes.MSG_SUCCESS);
+				resultMap.put("storeId", store.getStoreId());
+			}else{
+				Store store = storeDao.findByStoreId(storeUser.getStoreId());
+				//bean copy
+				BeanUtils.copyProperties(identify, store);
+				Date date = new Date();
+				store.setUpdDate(date);
+				store.setUserPhone(storeUser.getUserPhone());
+				//设置省区县
+				RegionInfo regionInfo = regionInfoDao.findByRegionCode(identify.getRegionProv());
+				if(regionInfo==null){
+					resultMap.put("code", SysCodes.FAIL);
+			        resultMap.put("msg", "所在省填写有误");
+			        return resultMap;
+				}
+				store.setRegionProvName(regionInfo.getRegionName());
+				regionInfo = regionInfoDao.findByRegionCode(identify.getRegionCity());
+				if(regionInfo==null){
+					resultMap.put("code", SysCodes.FAIL);
+			        resultMap.put("msg", "所在市填写有误");
+			        return resultMap;
+				}
+				store.setRegionCityName(regionInfo.getRegionName());
+				regionInfo= regionInfoDao.findByRegionCode(identify.getCompanyRegion());
+				if(regionInfo==null){
+					resultMap.put("code", SysCodes.FAIL);
+			        resultMap.put("msg", "所在区县填写有误");
+			        return resultMap;
+				}
+				store.setRegionAreaName(regionInfo.getRegionName());
+				//end
+				storeDao.save(store);
+				resultMap.put("code", SysCodes.SUCCESS);
+				resultMap.put("msg", SysCodes.MSG_SUCCESS);
+				resultMap.put("storeId", store.getStoreId());
+			}
+			
+		} catch (Exception e) {
+			// TODO: handle exception
+			e.printStackTrace();
+	        resultMap.put("code", SysCodes.FAIL);
+	        resultMap.put("msg", SysCodes.MSG_FAIL);
+		}
+		
+		return resultMap;
+	}
+	
+	/**
+	 * 获取省级信息
+	 * @param level
+	 * @return
+	 */
+	@RequestMapping(value="/user/prov/{level}",method=RequestMethod.GET)
+	public Object getProv(@PathVariable int level){
+		return regionInfoDao.findByRegionLevel(level);
+	}
+	
+	/**
+	 * 获取市级信息
+	 * @param level
+	 * @return
+	 */
+	@RequestMapping(value="/user/city/{level}",method=RequestMethod.GET)
+	public Object getCity(@PathVariable int level,@RequestParam int code){
+		String regionCode = code/10000+"";	
+		return regionInfoDao.find(level, regionCode);
+	}
+	
+	/**
+	 * 获取区级信息
+	 * @param level
+	 * @return
+	 */
+	@RequestMapping(value="/user/region/{level}",method=RequestMethod.GET)
+	public Object getRegion(@PathVariable int level,@RequestParam int code){
+		String regionCode = code/100+"";
+		return regionInfoDao.find(level, regionCode);
+		
+	}
+	
+	/**
+	 * 更新头像
+	 * @return
+	 */
+	@RequestMapping(value="/user",method=RequestMethod.PUT)
+	public Object updateUser(@RequestBody Map<String, String> paramMap){
+		String userAvatar = paramMap.get("userAvatar");
+		StoreUser storeUser = storeUserDao.findOne(getUserToken().getUserId());
+		storeUser.setUserAvatar(userAvatar);
+		return storeUserDao.save(storeUser);
+	}
+	
+	
+	/**
+	 * 生成token值
+	 * 
+	 * @param user
+	 * @return
+	 */
+	private String generateToken(StoreUser user, String secret) {
+		JWTSigner jwtSigner = new JWTSigner(secret);
+		Map<String, Object> claims = new HashMap<String, Object>();		
+		claims.put("userId", user.getUserId());;
+		claims.put("crtime", System.currentTimeMillis());
+		String token = jwtSigner.sign(claims);		
+		return token;
+	}
+	
+	/**
+	 * 设置门店账号
+	 * @param store
+	 */
+	private void setFinAcc(Store store){
+		FinAcc finAcc = finAccDao.findByAccNo(store.getStoreId());
+		if(finAcc==null){
+			finAcc = new FinAcc();
+			finAcc.setAccBal(new BigDecimal(0));
+			finAcc.setAccIncome(new BigDecimal(0));
+			finAcc.setAccNo(store.getStoreId());
+			finAcc.setAccPay(new BigDecimal(0));
+			finAcc.setUpdDate(new Date());
+			finAccDao.save(finAcc);
+		}
+	}
+	
+	/**
+	 * 设置门店关键字
+	 * @param store
+	 */
+	private void setWxKey(Store store){
+		WechatKey key1 = new WechatKey();
+		key1.setReplyType(1);
+		key1.setStoreId(store.getStoreId());
+		key1.setKeywordSearch(1);
+		key1.setReplyConType(1);
+		key1.setReplyText("欢迎光临");
+		WechatKey key2 = new WechatKey();
+		key2.setReplyType(3);
+		key2.setStoreId(store.getStoreId());
+		key2.setKeywordSearch(1);
+		key2.setReplyConType(1);
+		key2.setReplyText("感谢您关注微信公众号");
+		wechatKeyDao.save(key2);
+		wechatKeyDao.save(key1);
+	}
+}
